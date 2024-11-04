@@ -1,220 +1,272 @@
+from contextlib import contextmanager
 from typing import Iterator, Optional, Self
 
 from qiskit.quantum_info import Operator
 from qiskit.quantum_info.operators.predicates import *
 from rustworkx import PyDiGraph
 
-from lib.ops import *
-from lib.utils import get_basis, get_statevec, outer
+from lib.gates import *
+from lib.utils import *
 from superop import SuperOperator
 
 
-class SVTS:
-    Qsize: int = -1 # number of quantum variables in global system
+class SVTSMeta(type):
+    _qsize: int # global quantum variables
+
+    def __init__(cls, *args, **kwargs):
+        cls._qsize = -1
+
+    @property
+    def qsize(cls) -> int:
+        return cls._qsize
+
+    @property
+    def qvars(cls) -> list[int]:
+        return list(range(cls._qsize))
     
-    cfg: PyDiGraph  # control-flow graph of the SVTS
-    init: int       # initial location of the SVTS
-    exit: int       # exit location of the SVTS
+    @qsize.setter
+    def qsize(cls, _):
+        raise AttributeError("qsize is a read-only attribute")
+    
+    @qvars.setter
+    def qvars(cls, _):
+        raise AttributeError("qvars is a read-only attribute")
+    
+    @contextmanager
+    def meta_init(cls, qsize: int):
+        """
+        Instantiate a SVTS and set the set of global quantum variables.
+
+        :param int qvars: Global quantum variables, indexed {0, 1, ..., qvars - 1}.
+
+        :return: Context manager for the instantiated SVTS.
+        :rtype: ContextManager
+        """
+        cls._qsize = qsize # bypass read-only guard
+        try:
+            yield
+        finally:
+            cls._qsize = -1 # reset qvars before exiting
+
+
+class SVTS(metaclass=SVTSMeta):
+    """
+    Super-operator-Valued Transition System.
+    """
+    cfg: PyDiGraph  # control-flow graph
+    lin: int        # in location
+    lout: int       # out location
 
     def __init__(self):
         """
-        Initialise a super-operator-valued transition system.
+        Initialise an SVTS. Instantiation is only permitted to occur under the
+        context manager `meta_init`, which sets the global `qvars`:
+
+        An example is as follows:
+        ```
+        with SVTS.meta_init(qvars=3):
+            SVTS.init([1, 2])
+            SVTS.unit('H', [0])
+        ```
         """
-        if SVTS.Qsize == -1:
-            raise RuntimeError("Qsize has not been set")
+        if not SVTS.qvars:
+            raise RuntimeError("SVTS must be instantiated under meta_init")
         
         self.cfg = PyDiGraph(multigraph=False)
-        self.init = self.cfg.add_node(None)
-        self.exit = self.cfg.add_node(None)
+        self.lin = self.cfg.add_node(None)
+        self.lout = self.cfg.add_node(None)
 
     @classmethod
-    def Skip(cls, qvars: Optional[list[int]] = None) -> Self:
+    def skip(cls) -> Self:
         """
         Factory method for SVTS induced by the skip transition rule.
 
-        params:
-        - `qvars` (list[int] | None): Quantum variables the program acts on.
-        This must be a subset of {0, 1, ..., qsize - 1}. If None is given, the
-        program is assumed to act on all quantum variables.
-
-        returns:
-        - SVTS of resulting program
+        :return: Resulting program.
+        :rtype: SVTS
         """
-        if qvars is None:
-            qvars = list(range(cls.Qsize))
-        
         ts = cls()
-        ts.cfg.add_edge(ts.init, ts.exit, SuperOperator(I, qvars))
+        ts.cfg.add_edge(ts.lin, ts.lout, SuperOperator(GATE["I"], cls.qvars))
         
         return ts
     
     @classmethod
-    def Init(cls, qvars: Optional[list[int]] = None) -> Self:
+    def init(cls, qargs: Optional[list[int]] = None) -> Self:
         """
         Factory method for SVTS induced by the initiation transition rule.
 
-        params:
-        - `qsize` (int): Number of quantum variables in the system.
-        - `qvars` (list[int] | None): Quantum variables the program acts on.
-        This must be a subset of {0, 1, ..., qsize - 1}. If None is given, the
-        program is assumed to act on all quantum variables.
+        :param list[int] | None qargs: Quantum variables the program acts
+            on. This must be a subset of `cls.qvars`. If None is given,
+            the program is assumed to act on all of `cls.qvars`.
 
-        returns:
-        - SVTS of resulting program
+        :return: Resulting program.
+        :rtype: SVTS
         """
-        if qvars is None:
-            qvars = list(range(cls.Qsize))
+        qargs = cls.qvars if qargs is None else qargs
 
+        if len(qset := set(qargs)) != len(qargs):
+            raise ValueError("qargs contain duplicate qubits")
+        if qset - set(cls.qvars):
+            raise ValueError("qargs is not a subset of qvars")
+        
         ts = cls()
-        sv_0 = get_statevec((qv_dim := 2 ** len(qvars)), 0) # zero state vector
-        ops = [outer(sv_0, bv) for bv in get_basis(qv_dim)]
-        ts.cfg.add_edge(ts.init, ts.exit, SuperOperator(ops, qvars))
+        sv_0 = get_statevec(len(qargs), 0) # zero state vector
+        op = [outer(sv_0, bv) for bv in get_basis(len(qargs))]
+        ts.cfg.add_edge(ts.lin, ts.lout, SuperOperator(op, qargs))
         
         return ts
     
     @classmethod
-    def Unit(cls, op: Operator, qvars: Optional[list[int]] = None) -> Self:
+    def unit(cls, op: Operator, qargs: Optional[list[int]] = None) -> Self:
         """
         Factory method for SVTS induced by the unitary transformation
         transition rule.
         
-        params:
-        - `qsize` (int): Number of quantum variables in the system.
-        - `op` (Operator): unitary operator to be applied.
-        - `qvars` (list[int] | None): Quantum variables the program acts on.
-        This must be a subset of {0, 1, ..., qsize - 1}. If None is given, the
-        program is assumed to act on all quantum variables.
+        :param Operator op: Unitary operator to be applied.
+        :param list[int] | None qargs: Quantum variables the program acts
+            on. This must be a subset of `cls.qvars`. If None is given,
+            the program is assumed to act on all of `cls.qvars`.
 
-        returns:
-        - SVTS of resulting program
+        :return: Resulting program.
+        :rtype: SVTS
         """
+        qargs = cls.qvars if qargs is None else qargs
+
+        if len(qset := set(qargs)) != len(qargs):
+            raise ValueError("qargs contain duplicate qubits")
+        if qset - set(cls.qvars):
+            raise ValueError("qargs is not a subset of qvars")
         if not op.is_unitary():
             raise ValueError("op is not unitary")
-        if qvars is None:
-            qvars = list(range(cls.Qsize))
         
-        ts = cls()
-        ts.cfg.add_edge(ts.init, ts.exit, SuperOperator(op, qvars))
+        main = cls()
+        main.cfg.add_edge(main.lin, main.lout, SuperOperator(op, qargs))
 
-        return ts
+        return main
 
     @classmethod
-    def Comp(cls, l_ts: Self, r_ts: Self) -> Self:
+    def comp(cls, left: Self, right: Self) -> Self:
         """
         Factory method for SVTS induced by the sequential composition
         transition rule.
 
-        params:
-        - l_ts (SVTS): left program
-        - r_ts (SVTS): right program
+        :param SVTS left: Left program.
+        :param SVTS right: Right program.
 
-        returns:
-        - SVTS of resulting program
+        :return: Resulting program.
+        :rtype: SVTS
         """
-        # initialise composite program as left program
-        ts = cls()
-        ts.cfg = l_ts.cfg.copy()
-        ts.init = l_ts.init
+        # initialise main as left program
+        main = cls()
+        main.cfg = left.cfg.copy()
+        main.lin = left.lin
 
-        # merge composite program's exit location with right program's init location
-        edge_map_fn = lambda *_: r_ts.init
-        new_id = ts.cfg.substitute_node_with_subgraph(l_ts.exit, r_ts.cfg, edge_map_fn)
+        # merge left program's lout with right program's lin
+        edge_map_fn = lambda *_: right.lin
+        new_id = main.cfg.substitute_node_with_subgraph(left.lout, right.cfg, edge_map_fn)
         
-        # update exit location of composite program
-        ts.exit = new_id[r_ts.exit]
+        # update lout of main
+        main.lout = new_id[right.lout]
 
-        return ts
+        return main
 
     @classmethod
-    def Case(
+    def case(
         cls,
         *cases: tuple[Operator, Self],
-        qvars: Optional[list[int]] = None
+        qargs: Optional[list[int]] = None
     ) -> Self:
         """
         Factory method for SVTS induced by the quantum case statement
         transition rule.
 
-        params:
-        - `qsize` (int): Number of quantum variables in the system.
-        - `cases` (tuple[Operator, SVTS]): Sequence of (M_k, P_k) pairs,
+        :param tuple[Operator, SVTS] *cases: Sequence of (M_k, P_k) pairs,
         where M_k is a measurement operator and P_k is the corresponding
         sub-program. Measurement operators must satisfy the completeness
         condition: M_1'M_1 + ... + M_n'M_n = I.
-        - `qvars` (list[int] | None): Quantum variables the measurement is
-        performed on. This must be a subset of {0, 1, ..., qsize - 1}. If
-        None is given, the measurement is assumed to be performed on all
-        quantum variables.
+        :param list[int] | None qargs: Quantum variables the program acts
+            on. This must be a subset of `cls.qvars`. If None is given,
+            the program is assumed to act on all of `cls.qvars`.
+
+        :return: Resulting program.
+        :rtype: SVTS
         """
-        if qvars is None:
-            qvars = list(range(cls.Qsize))
-        
+        qargs = cls.qvars if qargs is None else qargs
+
+        if len(qset := set(qargs)) != len(qargs):
+            raise ValueError("qargs contain duplicate qubits")
+        if qset - set(cls.qvars):
+            raise ValueError("qargs is not a subset of qvars")
         if len(set(m_op.dim for m_op, _ in cases)) > 1:
             raise ValueError("measurement operators have different dimensions")
-        if not is_identity_matrix(sum(m_op for m_op, _ in cases)):
+        if not is_identity_matrix(sum(m_op.adjoint() @ m_op for m_op, _ in cases)):
             raise ValueError("completeness condition is not satisfied")
         
-        ts = cls()
-        sub_exits = []
+        main = cls()
 
-        # connect init location to sub-programs
-        for m_op, s_ts in cases:
-            node_map = {ts.init: (s_ts.init, SuperOperator(m_op, qvars))}
-            new_id = ts.cfg.compose(s_ts.cfg, node_map)
-            sub_exits.append(new_id[s_ts.exit])
+        # connect main's lin to sub-programs' lin
+        sub_exits = []
+        for op, sub in cases:
+            node_map = {main.lin: (sub.lin, SuperOperator(op, qargs))}
+            new_id = main.cfg.compose(sub.cfg, node_map)
+            sub_exits.append(new_id[sub.lout])
         
-        # merge all exit locations
-        ts.exit = ts.cfg.contract_nodes(sub_exits + [ts.exit], None)
+        # merge all louts
+        main.lout = main.cfg.contract_nodes(sub_exits + [main.lout], None)
         
-        return ts
+        return main
 
     @classmethod
-    def Loop(cls,
-        t_op: Operator,
-        f_op: Operator,
-        s_ts: Self,
-        qvars: Optional[list[int]] = None
+    def loop(cls,
+        true: Operator,
+        false: Operator,
+        body: Self,
+        qargs: Optional[list[int]] = None
     ) -> Self:
         """
-        params:
-        - `qsize` (int): Number of quantum variables in the system.
-        - `t_op` (Operator): Measurement operator representing true condition.
-        - `f_op` (Operator): Measurement operator representing false condition.
-        - `s_ts` (SVTS): Sub-program in the body of the loop. 
-        - `qvars` (list[int] | None): Quantum variables the measurement is
-        performed on. This must be a subset of {0, 1, ..., qsize - 1}. If
-        None is given, the measurement is assumed to be performed on all
-        quantum variables.
+        Factory method for SVTS induced by the quantum loop transition rule.
+
+        :param Operator true: Measurement operator representing true condition.
+        :param Operator false: Measurement operator representing false condition.
+        :param SVTS body: Sub-program in the body of the loop. 
+        :param list[int] | None qargs: Quantum variables the program acts
+            on. This must be a subset of `cls.qvars`. If None is given,
+            the program is assumed to act on all of `cls.qvars`.
+
+        :return: Resulting program.
+        :rtype: SVTS
         """
-        if qvars is None:
-            qvars = list(range(cls.Qsize))
-        
-        if t_op.dim != f_op.dim:
+        qargs = cls.qvars if qargs is None else qargs
+
+        if len(qset := set(qargs)) != len(qargs):
+            raise ValueError("qargs contain duplicate qubits")
+        if qset - set(cls.qvars):
+            raise ValueError("qargs is not a subset of qvars")
+        if true.dim != false.dim:
             raise ValueError("measurement operators have different dimensions")
-        if not is_identity_matrix(t_op + f_op):
+        if not is_identity_matrix(true + false):
             raise ValueError("completeness condition is not satisfied")
         
         ts = cls()
 
-        # connect init location (loop condition) to exit location (when false)
-        ts.cfg.add_edge(ts.init, ts.exit, SuperOperator(f_op, qvars))
+        # connect main's lin (loop condition) to its lout (when false)
+        ts.cfg.add_edge(ts.lin, ts.lout, SuperOperator(false, qargs))
 
-        # connect init location (loop condition) to sub-program (when true)
-        node_map = {ts.init: (s_ts.init, SuperOperator(t_op, qvars))}
-        new_id = ts.cfg.compose(s_ts.cfg, node_map)
+        # connect main's lin (loop condition) to sub-program's lin (when true)
+        node_map = {ts.lin: (body.lin, SuperOperator(true, qargs))}
+        new_id = ts.cfg.compose(body.cfg, node_map)
 
-        # merge exit location of subprogram with init location
-        ts.init = ts.cfg.contract_nodes([new_id[s_ts.exit], ts.init], None)
+        # merge sub-programs' lout with main's lin
+        ts.lin = ts.cfg.contract_nodes([new_id[body.lout], ts.lin], None)
 
         return ts
 
     def transitions(self) -> Iterator[tuple[int, int, SuperOperator]]:
         """
         Return an iterator over the transitions in this SVTS. Each
-        transition is a tuple of the form (pre, post, s_op).
+        transition is a tuple of the form (pre, post, op).
 
-        returns:
-        - Iterator over sequence of (pre, post, s_op).
+        :return: Iterator over sequence of (pre, post, op).
+        :rtype: Iterator[tuple[int, int, SuperOperator]]
         """
         edges = sorted(self.cfg.edge_list())
         for pre, post in edges:
@@ -223,20 +275,20 @@ class SVTS:
 
 if __name__ == "__main__":
 
-    SVTS.Qsize = 3
+    with SVTS.meta_init(qvars=3):
 
-    # case statement
-    ts_0 = SVTS.Unit(Operator(CX), qvars=[2,1])
-    ts_1 = SVTS.Init(qvars=[1,2])
-    l_ts = SVTS.Case((M0, ts_0), (M1, ts_1), qvars=[0])
+        # case statement
+        ts_0 = SVTS.unit(Operator(GATE["CX"]), qargs=[2,1])
+        ts_1 = SVTS.init(qargs=[1,2])
+        l_ts = SVTS.case((GATE["M0"], ts_0), (GATE["M1"], ts_1), qargs=[0])
 
-    # while loop
-    s_ts = SVTS.Unit(H.tensor(H), qvars=[1,0])
-    r_ts = SVTS.Loop(M0, M1, s_ts, qvars=[2])
+        # while loop
+        s_ts = SVTS.unit(GATE["H"].tensor(GATE["H"]), qargs=[1,0])
+        r_ts = SVTS.loop(GATE["M0"], GATE["M1"], s_ts, qargs=[2])
 
-    ts = SVTS.Comp(l_ts, r_ts)
+        ts = SVTS.comp(l_ts, r_ts)
 
-    print(f"init: {ts.init}")
-    print(f"exit: {ts.exit}")
+    print(f"init: {ts.lin}")
+    print(f"exit: {ts.lout}")
     for pre, post, s_op in ts.transitions():
         print(f"{pre} -> {post}: {s_op}")

@@ -1,32 +1,28 @@
 import numpy as np
 from qiskit.quantum_info import Kraus, Operator
 
-from lib.ops import *
-
 
 class SuperOperator(Kraus):
     """
-    Kraus representation of a Super-operator.
+    Kraus representation of a Superoperator.
     """
-    _qvars: list[int]   # ordered quantum variables applied on by super-operator
-    _qvdim: int         # dimension of state space induced by quantum variables
+    _qargs: list[int]   # ordered quantum variables applied on by super-operator
 
-    def __init__(self, data: Operator | list[Operator], qvars: list[int]):
+    def __init__(self, op: Operator | list[Operator], qargs: list[int]):
         """
-        Initialise a super-operator.
+        Initialise a superoperator.
         """
-        self._qvars = qvars
-        self._qvdim = 2 ** len(qvars)
-        super().__init__(data)
+        super().__init__(op)
+        self._qargs = qargs
 
-        if len(set(self._qvars)) < len(self._qvars):
-            raise ValueError(f"qvars contain duplicate qubits")
-        if self.dim[0] != self._qvdim:
-            raise ValueError(
-                f"mismatch between dim of super-op ({self.dim[0]}) and qvars ({self._qvdim})"
-            )
+        if len(set(self._qargs)) < len(self._qargs):
+            raise ValueError(f"qargs contain duplicate qubits")
+        # if self.dim[0] != (qdim := 2 ** len(qargs)):
+        #     raise ValueError(
+        #         f"mismatch between dim of super-op ({self.dim[0]}) and qargs ({qdim})"
+        #     )
 
     def __repr__(self) -> str:
-        data = np.array_str(sum(self._data[0])).replace('\n', '\n  ')
-        qvars = ','.join(map(str, self._qvars))
-        return f"SuperOperator(\n  {''.join(data)}\n  qvars=[{qvars}]\n)"
+        op = np.array_str(sum(self._data[0])).replace('\n', '\n  ')
+        qargs = ','.join(map(str, self._qargs))
+        return f"SuperOperator(\n  {''.join(op)}\n  qargs=[{qargs}]\n)"
