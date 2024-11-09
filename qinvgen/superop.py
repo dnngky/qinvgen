@@ -1,3 +1,5 @@
+from typing import Self
+
 import numpy as np
 from qiskit.quantum_info import Kraus, Operator
 
@@ -13,14 +15,36 @@ class SuperOperator(Kraus):
         Initialise a superoperator.
         """
         super().__init__(op)
-        self._qargs = qargs
+        self._qargs = qargs.copy()
 
         if len(set(self._qargs)) < len(self._qargs):
             raise ValueError(f"qargs contain duplicate qubits")
-        # if self.dim[0] != (qdim := 2 ** len(qargs)):
-        #     raise ValueError(
-        #         f"mismatch between dim of super-op ({self.dim[0]}) and qargs ({qdim})"
-        #     )
+        
+    @property
+    def qargs(self) -> list[int]:
+        return self._qargs.copy()
+    
+    @qargs.setter
+    def qargs(self, new_qargs: list[int]):
+        self._qargs = new_qargs
+        
+    def __matmul__(self, other: Self | Operator):
+        other_data = other._data
+        if isinstance(other, SuperOperator):
+            other_data = other_data[0]
+        return SuperOperator(Kraus(self._data[0]) @ Kraus(other_data), self._qargs)
+
+    def __and__(self, other: Self | Operator):
+        other_data = other._data
+        if isinstance(other, SuperOperator):
+            other_data = other_data[0]
+        return SuperOperator(Kraus(self._data[0]) & Kraus(other_data), self._qargs)
+    
+    def dot(self, other: Self | Operator):
+        return self @ other
+    
+    def compose(self, other: Self | Operator):
+        return self & other
 
     def __repr__(self) -> str:
         op = np.array_str(sum(self._data[0])).replace('\n', '\n  ')

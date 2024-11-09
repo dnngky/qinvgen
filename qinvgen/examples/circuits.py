@@ -5,25 +5,8 @@ from typing import Literal
 from qiskit import AncillaRegister, ClassicalRegister, QuantumCircuit, QuantumRegister
 from qiskit import qasm3
 from qiskit.circuit.library import XGate
-from qiskit.quantum_info import Operator
 
 QASM_OUT_DIR = "qasm"
-
-
-def big_endian(op: Operator) -> Operator:
-    """
-    Convert an operator from little endian to an equivalent operator in big endian.
-
-    :param Operator op: Operator written in little endian.
-
-    :return: Equivalent operator written in big endian.
-    :rtype: Operator
-    """
-    qsize = int(math.log2(op.dim[0]))
-    qargs = list(reversed(range(qsize)))
-    op = op.apply_permutation(qargs, front=True)
-    op = op.apply_permutation(qargs)
-    return op
 
 
 def export(name: str):
@@ -40,7 +23,9 @@ def export(name: str):
 
 @export("example_1")
 def example_1() -> QuantumCircuit:
-
+    """
+    Example circuit 1.
+    """
     qr = QuantumRegister(3, 'q')
     ar = AncillaRegister(1, 'r')
     cr = ClassicalRegister(1, 'c')
@@ -63,25 +48,21 @@ def example_1() -> QuantumCircuit:
     return qc
 
 
-@export("quantum_walk")
-def quantum_walk(n: int) -> QuantumCircuit:
-
+def qwalk(n: int) -> QuantumCircuit:
+    """
+    Quantum walk circuit.
+    """
     m = math.ceil(math.log2(n)) # number of qubits to encode n positions
 
     # modulo n increment/decrement operation
-    def mod_op(op: Literal["add", "sub"]):
+    def shift_op(op: Literal['l', 'r']):
         qr = QuantumRegister(m)
-        qc = QuantumCircuit(qr, name=f"mod_{op}")
+        qc = QuantumCircuit(qr, name=f"{op}shift")
         for i in range(m - 1, 0, -1):
-            ctrl = 2**i - 1 if op == "add" else 0
+            ctrl = 2**i - 1 if op == 'r' else 0
             qc.append(XGate().control(i, ctrl_state=ctrl), qr[:i + 1])
         qc.x(0)
-        return qc
-    
-    shift = QuantumCircuit(1 + m, name="shift")
-    shift.compose(mod_op("sub").control(ctrl_state=0), inplace=True)
-    shift.compose(mod_op("add").control(ctrl_state=1), inplace=True)
-    shift = shift.to_gate()
+        return qc.reverse_bits()
 
     dir = QuantumRegister(1, 'dir') # coin (direction) space
     pos = QuantumRegister(m, 'pos') # position space
@@ -91,7 +72,26 @@ def quantum_walk(n: int) -> QuantumCircuit:
     qc.measure(pos, out)
     with qc.while_loop((out, 0)):
         qc.h(dir)
-        qc.compose(shift, inplace=True)
+        qc.x(dir)
+        qc.compose(shift_op('l').control(), inplace=True)
+        qc.x(dir)
+        qc.compose(shift_op('r').control(), inplace=True)
         qc.measure(pos, out)
     
     return qc
+
+
+@export("qwalk_2")
+def qwalk_2() -> QuantumCircuit:
+    """
+    Quantum walk circuit with 2 position qubits.
+    """
+    return qwalk(n=4)
+
+
+@export("qwalk_3")
+def qwalk_3() -> QuantumCircuit:
+    """
+    Quantum walk circuit with 3 position qubits.
+    """
+    return qwalk(n=8)
